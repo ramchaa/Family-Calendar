@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Family Calendar</title>
+
+  <!-- FullCalendar -->
+  <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.js"></script>
+
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import {
+      getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import {
+      getFirestore, collection, addDoc, updateDoc, deleteDoc,
+      doc, onSnapshot, query, orderBy
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    // ── Firebase config ──────────────────────────────────────────────────────
+    const firebaseConfig = {
+      apiKey: "AIzaSyBvRAMAyamcqCZcK-8AA3P2jTuEH1Qw-MU",
+      authDomain: "family-calendar-f17df.firebaseapp.com",
+      projectId: "family-calendar-f17df",
+      storageBucket: "family-calendar-f17df.firebasestorage.app",
+      messagingSenderId: "997512313817",
+      appId: "1:997512313817:web:43bbbe3e00f29eafd377c8"
+    };
+
+    const app  = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db   = getFirestore(app);
+
+    // ── Family member colors & initials ──────────────────────────────────────
+    // Keyed by Google email address — add each family member's Gmail here
+    const FAMILY = {
+      // "dad@gmail.com":        { name: "Dad",    initials: "RR", color: "#2563EB" },
+      // "mom@gmail.com":        { name: "Mom",    initials: "MR", color: "#7C3AED" },
+      // "daughter1@gmail.com":  { name: "Sofia",  initials: "SR", color: "#059669" },
+      // "daughter2@gmail.com":  { name: "Aisha",  initials: "AR", color: "#D97706" },
+      // "grandfather@gmail.com":{ name: "Pop",    initials: "PR", color: "#DC2626" },
+    };
+
+    const COLORS = ["#2563EB","#7C3AED","#059669","#D97706","#DC2626","#0891B2","#BE185D"];
+    const autoColor = {};
+    let colorIdx = 0;
+
+    function memberInfo(email) {
+      if (FAMILY[email]) return FAMILY[email];
+      if (!autoColor[email]) {
+        const parts = (email || "?").split("@")[0].split(/[.\-_]/);
+        const initials = parts.slice(0,2).map(p => p[0]?.toUpperCase() || "?").join("");
+        autoColor[email] = { name: parts[0], initials, color: COLORS[colorIdx++ % COLORS.length] };
+      }
+      return autoColor[email];
+    }
+
+    // ── State ────────────────────────────────────────────────────────────────
+    let calendar   = null;
+    let currentUser = null;
+    let allEvents  = {};   // id → raw Firestore data
+    let unsubscribe = null;
+
+    // ── DOM refs ─────────────────────────────────────────────────────────────
+    const loginScreen  = document.getElementById("login-screen");
+    const appScreen    = document.getElementById("app-screen");
+    const calendarEl   = document.getElementById("calendar");
+    const modal        = document.getElementById("event-modal");
+    const modalTitle   = document.getElementById("modal-title");
+    const form         = document.getElementById("event-form");
+    const fTitle       = document.getElementById("f-title");
+    const fStart       = document.getElementById("f-start");
+    const fEnd         = document.getElementById("f-end");
+    const fAllDay      = document.getElementById("f-allday");
+    const fNotes       = document.getElementById("f-notes");
+    const fId          = document.getElementById("f-id");
+    const deleteBtn    = document.getElementById("btn-delete");
+    const cancelBtn    = document.getElementById("btn-cancel");
+    const userBadge    = document.getElementById("user-badge");
+    const signOutBtn   = document.getElementById("btn-signout");
+    const signInBtn    = document.getElementById("btn-signin");
+    const legendEl     = document.getElementById("legend");
+    const toast        = document.getElementById("toast");
+
+    // ── Auth ─────────────────────────────────────────────────────────────────
+    signInBtn.addEventListener("click", () => {
+      signInWithPopup(auth, new GoogleAuthProvider()).catch(e => showToast(e.message, true));
+    });
+
+    signOutBtn.addEventListener("click", () => signOut(auth));
+
+    onAuthStateChanged(auth, user => {
+      currentUser = user;
+      if (user) {
+        loginScreen.hidden = true;
+        appScreen.hidden   = false;
+        const m = memberInfo(user.email);
+        userBadge.textContent = m.initials;
+        userBadge.style.background = m.color;
+        startListening();
+        initCalendar();
+      } else {
+        loginScreen.hidden = false;
+        appScreen.hidden   = true;
+        if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+        if (calendar)    { calendar.destroy(); calendar = null; }
+      }
+    });
+
+    // ── Firestore listener ───────────────────────────────────────────────────
+    function startListening() {
+      const q = query(collection(db, "events"), orderBy("start"));
+      unsubscribe = onSnapshot(q, snap => {
+        allEvents = {};
+        snap.forEach(d => { allEvents[d.id] = { id: d.id, ...d.data() }; });
+        if (calendar) refreshCalendar();
+        refreshLegend();
+      });
+    }
+
+    function fcEvents() {
+      return Object.values(allEvents).map(e => {
+        const m = memberInfo(e.createdBy);
+        return {
+          id:        e.id,
+          title:     e.title,
+          start:     e.start,
+          end:       e.end || null,
+          allDay:    e.allDay,
+          color:     m.color,
+          extendedProps: { notes: e.notes, createdBy: e.createdBy, initials: m.initials }
+        };
+      });
+    }
+
+    // ── FullCalendar ─────────────────────────────────────────────────────────
+    function initCalendar() {
+      if (calendar) return;
+      calendar = new FullCalendar.Calendar(calendarEl, {
+        initialView:   window.innerWidth < 640 ? "listWeek" : "dayGridMonth",
+        headerToolbar: {
+          left:   "prev,next today",
+          center: "title",
+          right:  "dayGridMonth,timeGridWeek,timeGridDay,listWeek"
+        },
+        buttonText: { listWeek: "list" },
+        height:      "100%",
+        editable:    true,
+        selectable:  true,
+        eventDisplay:"block",
+
+        // Click empty date → new event
+        dateClick(info) {
+          openModal(null, info.dateStr);
+        },
+        // Click existing event → edit
+        eventClick(info) {
+          openModal(allEvents[info.event.id]);
+        },
+        // Drag-to-create
+        select(info) {
+          openModal(null, info.startStr, info.endStr, info.allDay);
+        },
+        // Drag to reschedule
+        eventDrop(info) {
+          const e = info.event;
+          updateDoc(doc(db,"events",e.id), {
+            start:  e.startStr,
+            end:    e.endStr || null,
+            allDay: e.allDay
+          }).catch(() => { info.revert(); showToast("Couldn't save change.", true); });
+        },
+        // Resize
+        eventResize(info) {
+          const e = info.event;
+          updateDoc(doc(db,"events",e.id), {
+            start: e.startStr,
+            end:   e.endStr || null
+          }).catch(() => { info.revert(); showToast("Couldn't save change.", true); });
+        },
+        // Render initials badge on each event
+        eventDidMount(info) {
+          const badge = document.createElement("span");
+          badge.className = "fc-initials";
+          badge.textContent = info.event.extendedProps.initials;
+          info.el.querySelector(".fc-event-title")?.prepend(badge);
+        },
+        events: fcEvents()
+      });
+      calendar.render();
+    }
+
+    function refreshCalendar() {
+      if (!calendar) return;
+      calendar.removeAllEvents();
+      fcEvents().forEach(e => calendar.addEvent(e));
+    }
+
+    // ── Legend ───────────────────────────────────────────────────────────────
+    function refreshLegend() {
+      const seen = {};
+      Object.values(allEvents).forEach(e => { seen[e.createdBy] = true; });
+      if (currentUser) seen[currentUser.email] = true;
+      legendEl.innerHTML = "";
+      Object.keys(seen).forEach(email => {
+        const m = memberInfo(email);
+        const chip = document.createElement("span");
+        chip.className = "legend-chip";
+        chip.innerHTML = `<span class="legend-dot" style="background:${m.color}"></span>${m.name}`;
+        legendEl.appendChild(chip);
+      });
+    }
+
+    // ── Modal helpers ────────────────────────────────────────────────────────
+    function pad(s) { return String(s).padStart(2,"0"); }
+
+    function toDatetimeLocal(iso) {
+      if (!iso) return "";
+      const d = new Date(iso);
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function toDateInput(iso) {
+      if (!iso) return "";
+      return iso.slice(0,10);
+    }
+
+    fAllDay.addEventListener("change", () => {
+      const isAll = fAllDay.checked;
+      fStart.type = isAll ? "date" : "datetime-local";
+      fEnd.type   = isAll ? "date" : "datetime-local";
+    });
+
+    function openModal(event, defaultStart, defaultEnd, defaultAllDay) {
+      form.reset();
+      if (event) {
+        // Editing existing
+        modalTitle.textContent = "Edit entry";
+        fId.value    = event.id;
+        fTitle.value = event.title;
+        fNotes.value = event.notes || "";
+        fAllDay.checked = !!event.allDay;
+        fAllDay.dispatchEvent(new Event("change"));
+        fStart.value = event.allDay ? toDateInput(event.start) : toDatetimeLocal(event.start);
+        fEnd.value   = event.end ? (event.allDay ? toDateInput(event.end) : toDatetimeLocal(event.end)) : "";
+        deleteBtn.hidden = false;
+      } else {
+        // New event
+        modalTitle.textContent = "New entry";
+        fId.value = "";
+        const allDay = defaultAllDay !== undefined ? defaultAllDay : !defaultStart?.includes("T");
+        fAllDay.checked = allDay;
+        fAllDay.dispatchEvent(new Event("change"));
+        fStart.value = allDay ? toDateInput(defaultStart) : toDatetimeLocal(defaultStart);
+        fEnd.value   = defaultEnd ? (allDay ? toDateInput(defaultEnd) : toDatetimeLocal(defaultEnd)) : "";
+        deleteBtn.hidden = true;
+      }
+      modal.hidden = false;
+      fTitle.focus();
+    }
+
+    cancelBtn.addEventListener("click", () => { modal.hidden = true; });
+    modal.addEventListener("click", e => { if (e.target === modal) modal.hidden = true; });
+
+    // ── Save ─────────────────────────────────────────────────────────────────
+    form.addEventListener("submit", async e => {
+      e.preventDefault();
+      if (!fTitle.value.trim()) { fTitle.focus(); return; }
+
+      const payload = {
+        title:     fTitle.value.trim(),
+        start:     fStart.value,
+        end:       fEnd.value || null,
+        allDay:    fAllDay.checked,
+        notes:     fNotes.value.trim(),
+        createdBy: currentUser.email,
+        updatedAt: new Date().toISOString()
+      };
+
+      try {
+        if (fId.value) {
+          await updateDoc(doc(db,"events",fId.value), payload);
+          showToast("Entry updated.");
+        } else {
+          payload.createdAt = new Date().toISOString();
+          await addDoc(collection(db,"events"), payload);
+          showToast("Entry added.");
+        }
+        modal.hidden = true;
+      } catch(err) {
+        showToast("Couldn't save: " + err.message, true);
+      }
+    });
+
+    // ── Delete ───────────────────────────────────────────────────────────────
+    deleteBtn.addEventListener("click", async () => {
+      if (!fId.value) return;
+      if (!confirm("Delete this entry?")) return;
+      try {
+        await deleteDoc(doc(db,"events",fId.value));
+        modal.hidden = true;
+        showToast("Entry deleted.");
+      } catch(err) {
+        showToast("Couldn't delete: " + err.message, true);
+      }
+    });
+
+    // ── Add button ───────────────────────────────────────────────────────────
+    document.getElementById("btn-add").addEventListener("click", () => {
+      const today = new Date();
+      const iso = `${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+      openModal(null, iso);
+    });
+
+    // ── Toast ────────────────────────────────────────────────────────────────
+    function showToast(msg, isError = false) {
+      toast.textContent = msg;
+      toast.className   = "toast show" + (isError ? " error" : "");
+      setTimeout(() => { toast.className = "toast"; }, 3000);
+    }
+
+  </script>
+
+  <style>
+    /* ── Reset & tokens ───────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #F8F7F4;
+      --surface:   #FFFFFF;
+      --border:    #E2DDD6;
+      --text:      #1A1814;
+      --muted:     #6B6560;
+      --accent:    #2563EB;
+      --danger:    #DC2626;
+      --radius:    10px;
+      --font:      "Inter", system-ui, sans-serif;
+      --shadow:    0 4px 24px rgba(0,0,0,0.10);
+    }
+
+    @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Login screen ─────────────────────────────────────────────────────── */
+    #login-screen {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+
+    .login-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2.5rem 2rem;
+      max-width: 360px;
+      width: 100%;
+      text-align: center;
+      box-shadow: var(--shadow);
+    }
+
+    .login-card .home-icon {
+      font-size: 2.5rem;
+      margin-bottom: 0.75rem;
+      display: block;
+    }
+
+    .login-card h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+
+    .login-card p {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+    }
+
+    /* ── App shell ────────────────────────────────────────────────────────── */
+    #app-screen {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    /* ── Top bar ──────────────────────────────────────────────────────────── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0.6rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    header h1 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      flex: 1;
+      white-space: nowrap;
+    }
+
+    #legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .legend-chip {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    #user-badge {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    /* ── Calendar wrapper ─────────────────────────────────────────────────── */
+    #calendar-wrap {
+      flex: 1;
+      padding: 1rem;
+      min-height: 0;
+      overflow: auto;
+    }
+
+    #calendar {
+      height: calc(100dvh - 120px);
+    }
+
+    /* ── FullCalendar overrides ───────────────────────────────────────────── */
+    .fc .fc-toolbar-title    { font-size: 1rem !important; font-weight: 700; }
+    .fc .fc-button            { font-size: 0.78rem !important; padding: 0.3em 0.6em !important; border-radius: 6px !important; }
+    .fc .fc-button-primary    { background: var(--accent) !important; border-color: var(--accent) !important; }
+    .fc .fc-button-primary:not(.fc-button-active):hover { filter: brightness(1.1); }
+    .fc .fc-button-active     { background: #1e3a8a !important; border-color: #1e3a8a !important; }
+    .fc-event                 { border-radius: 5px !important; border: none !important; font-size: 0.78rem !important; cursor: pointer; }
+    .fc-initials              { font-size: 0.65rem; background: rgba(0,0,0,0.18); border-radius: 3px; padding: 0 3px; margin-right: 3px; vertical-align: middle; color: #fff; }
+    .fc-daygrid-day:hover .fc-daygrid-day-frame { background: rgba(37,99,235,0.04); }
+
+    /* ── Buttons ──────────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.45rem 0.9rem;
+      border-radius: var(--radius);
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: filter 0.15s;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .btn:hover { filter: brightness(1.08); }
+    .btn-primary   { background: var(--accent); color: #fff; }
+    .btn-ghost     { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    .btn-danger    { background: var(--danger); color: #fff; }
+    .btn-google {
+      background: #fff;
+      color: #3c4043;
+      border: 1px solid var(--border);
+      font-size: 0.95rem;
+      padding: 0.65rem 1.2rem;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .btn-google svg { width: 18px; height: 18px; }
+
+    /* ── Modal ────────────────────────────────────────────────────────────── */
+    #event-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      z-index: 1000;
+    }
+
+    #event-modal[hidden] { display: none; }
+
+    .modal-card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      width: 100%;
+      max-width: 440px;
+      padding: 1.5rem;
+      box-shadow: var(--shadow);
+    }
+
+    .modal-card h2 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 1.25rem;
+    }
+
+    /* ── Form ─────────────────────────────────────────────────────────────── */
+    .field { margin-bottom: 1rem; }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 0.3rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    input[type="text"],
+    input[type="date"],
+    input[type="datetime-local"],
+    textarea {
+      width: 100%;
+      padding: 0.55rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      font-size: 0.9rem;
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      transition: border-color 0.15s;
+    }
+
+    input:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
+    }
+
+    textarea { resize: vertical; min-height: 70px; }
+
+    .field-row {
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    .field-row .field { flex: 1; }
+
+    .allday-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .allday-row input[type="checkbox"] {
+      width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer;
+    }
+
+    .allday-row label {
+      margin: 0; text-transform: none; letter-spacing: 0;
+      font-size: 0.88rem; font-weight: 500; color: var(--text); cursor: pointer;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 1.25rem;
+      flex-wrap: wrap;
+    }
+
+    .modal-actions .btn-danger { margin-left: auto; }
+
+    /* ── Toast ────────────────────────────────────────────────────────────── */
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: #1A1814;
+      color: #fff;
+      padding: 0.65rem 1.2rem;
+      border-radius: 8px;
+      font-size: 0.88rem;
+      font-weight: 500;
+      opacity: 0;
+      transition: all 0.25s ease;
+      z-index: 2000;
+      white-space: nowrap;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .toast.error { background: var(--danger); }
+
+    /* ── Mobile ───────────────────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      header h1 { font-size: 0.95rem; }
+      #legend   { display: none; }
+      .field-row { flex-direction: column; gap: 0; }
+      #calendar { height: calc(100dvh - 100px); }
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- ── Login ────────────────────────────────────────────────────────────── -->
+  <div id="login-screen">
+    <div class="login-card">
+      <span class="home-icon">🏠</span>
+      <h1>Family Calendar</h1>
+      <p>Sign in to view and manage the family schedule.</p>
+      <button id="btn-signin" class="btn btn-google">
+        <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+          <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+          <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+          <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+          <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+        </svg>
+        Sign in with Google
+      </button>
+    </div>
+  </div>
+
+  <!-- ── App ──────────────────────────────────────────────────────────────── -->
+  <div id="app-screen" hidden>
+
+    <header>
+      <h1>🏠 Family Calendar</h1>
+      <div id="legend"></div>
+      <div class="header-right">
+        <button id="btn-add" class="btn btn-primary">+ Add</button>
+        <div id="user-badge"></div>
+        <button id="btn-signout" class="btn btn-ghost">Sign out</button>
+      </div>
+    </header>
+
+    <div id="calendar-wrap">
+      <div id="calendar"></div>
+    </div>
+
+  </div>
+
+  <!-- ── Event modal ───────────────────────────────────────────────────────── -->
+  <div id="event-modal" hidden role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <h2 id="modal-title">New entry</h2>
+      <form id="event-form" novalidate>
+        <input type="hidden" id="f-id" />
+
+        <div class="field">
+          <label for="f-title">What</label>
+          <input type="text" id="f-title" placeholder="Dentist, School play, Flight to Miami…" required />
+        </div>
+
+        <div class="allday-row">
+          <input type="checkbox" id="f-allday" checked />
+          <label for="f-allday">All-day event</label>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="f-start">Start</label>
+            <input type="date" id="f-start" required />
+          </div>
+          <div class="field">
+            <label for="f-end">End (optional)</label>
+            <input type="date" id="f-end" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="f-notes">Notes (optional)</label>
+          <textarea id="f-notes" placeholder="Address, confirmation number, reminder…"></textarea>
+        </div>
+
+        <div class="modal-actions">
+          <button type="submit" class="btn btn-primary">Save</button>
+          <button type="button" id="btn-cancel" class="btn btn-ghost">Cancel</button>
+          <button type="button" id="btn-delete" class="btn btn-danger">Delete</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Toast ────────────────────────────────────────────────────────────── -->
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+</body>
+</html>
