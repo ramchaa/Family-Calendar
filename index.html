@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Family Calendar</title>
+  <title>Ramchandran Family Calendar</title>
 
   <!-- FullCalendar -->
   <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css" rel="stylesheet" />
@@ -17,7 +17,7 @@
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
     import {
       getFirestore, collection, addDoc, updateDoc, deleteDoc,
-      doc, onSnapshot, query, orderBy
+      doc, onSnapshot, query, orderBy, setDoc, getDoc
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
     // ── Firebase config ──────────────────────────────────────────────────────
@@ -34,56 +34,80 @@
     const auth = getAuth(app);
     const db   = getFirestore(app);
 
-    // ── Family member colors & initials ──────────────────────────────────────
-    // Keyed by Google email address — add each family member's Gmail here
-    const FAMILY = {
-      // "dad@gmail.com":        { name: "Dad",    initials: "RR", color: "#2563EB" },
-      // "mom@gmail.com":        { name: "Mom",    initials: "MR", color: "#7C3AED" },
-      // "daughter1@gmail.com":  { name: "Sofia",  initials: "SR", color: "#059669" },
-      // "daughter2@gmail.com":  { name: "Aisha",  initials: "AR", color: "#D97706" },
-      // "grandfather@gmail.com":{ name: "Pop",    initials: "PR", color: "#DC2626" },
-    };
-
-    const COLORS = ["#2563EB","#7C3AED","#059669","#D97706","#DC2626","#0891B2","#BE185D"];
-    const autoColor = {};
+    // ── Default colors palette ───────────────────────────────────────────────
+    const PALETTE = ["#2563EB","#7C3AED","#059669","#D97706","#DC2626","#0891B2","#BE185D","#92400E","#065F46","#1E3A5F"];
+    const userProfiles = {};   // email → { name, initials, color }
     let colorIdx = 0;
 
-    function memberInfo(email) {
-      if (FAMILY[email]) return FAMILY[email];
-      if (!autoColor[email]) {
-        const parts = (email || "?").split("@")[0].split(/[.\-_]/);
-        const initials = parts.slice(0,2).map(p => p[0]?.toUpperCase() || "?").join("");
-        autoColor[email] = { name: parts[0], initials, color: COLORS[colorIdx++ % COLORS.length] };
-      }
-      return autoColor[email];
+    function getProfile(email) {
+      if (userProfiles[email]) return userProfiles[email];
+      const parts  = (email || "?").split("@")[0].split(/[.\-_]/);
+      const initials = parts.slice(0,2).map(p => (p[0] || "?").toUpperCase()).join("");
+      const name   = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
+      userProfiles[email] = { name, initials, color: PALETTE[colorIdx++ % PALETTE.length] };
+      return userProfiles[email];
+    }
+
+    async function loadUserProfile(email) {
+      try {
+        const snap = await getDoc(doc(db, "userProfiles", email));
+        if (snap.exists()) {
+          userProfiles[email] = { ...getProfile(email), ...snap.data() };
+        }
+      } catch(e) { /* ignore — use default */ }
+    }
+
+    async function saveUserColor(email, color) {
+      userProfiles[email] = { ...getProfile(email), color };
+      await setDoc(doc(db, "userProfiles", email), { color }, { merge: true });
     }
 
     // ── State ────────────────────────────────────────────────────────────────
-    let calendar   = null;
+    let calendar    = null;
     let currentUser = null;
-    let allEvents  = {};   // id → raw Firestore data
+    let allEvents   = {};
     let unsubscribe = null;
+    let idleTimer   = null;
+    const IDLE_MS   = 10 * 60 * 1000;  // 10 minutes
 
     // ── DOM refs ─────────────────────────────────────────────────────────────
-    const loginScreen  = document.getElementById("login-screen");
-    const appScreen    = document.getElementById("app-screen");
-    const calendarEl   = document.getElementById("calendar");
-    const modal        = document.getElementById("event-modal");
-    const modalTitle   = document.getElementById("modal-title");
-    const form         = document.getElementById("event-form");
-    const fTitle       = document.getElementById("f-title");
-    const fStart       = document.getElementById("f-start");
-    const fEnd         = document.getElementById("f-end");
-    const fAllDay      = document.getElementById("f-allday");
-    const fNotes       = document.getElementById("f-notes");
-    const fId          = document.getElementById("f-id");
-    const deleteBtn    = document.getElementById("btn-delete");
-    const cancelBtn    = document.getElementById("btn-cancel");
-    const userBadge    = document.getElementById("user-badge");
-    const signOutBtn   = document.getElementById("btn-signout");
-    const signInBtn    = document.getElementById("btn-signin");
-    const legendEl     = document.getElementById("legend");
-    const toast        = document.getElementById("toast");
+    const loginScreen   = document.getElementById("login-screen");
+    const appScreen     = document.getElementById("app-screen");
+    const calendarEl    = document.getElementById("calendar");
+    const modal         = document.getElementById("event-modal");
+    const modalTitle    = document.getElementById("modal-title");
+    const form          = document.getElementById("event-form");
+    const fTitle        = document.getElementById("f-title");
+    const fStart        = document.getElementById("f-start");
+    const fEnd          = document.getElementById("f-end");
+    const fAllDay       = document.getElementById("f-allday");
+    const fNotes        = document.getElementById("f-notes");
+    const fId           = document.getElementById("f-id");
+    const deleteBtn     = document.getElementById("btn-delete");
+    const cancelBtn     = document.getElementById("btn-cancel");
+    const userBadge     = document.getElementById("user-badge");
+    const signOutBtn    = document.getElementById("btn-signout");
+    const signInBtn     = document.getElementById("btn-signin");
+    const legendEl      = document.getElementById("legend");
+    const toast         = document.getElementById("toast");
+    const colorModal    = document.getElementById("color-modal");
+    const colorGrid     = document.getElementById("color-grid");
+    const colorCancel   = document.getElementById("btn-color-cancel");
+    const tooltip       = document.getElementById("event-tooltip");
+
+    // ── Idle auto-logout ─────────────────────────────────────────────────────
+    function resetIdle() {
+      clearTimeout(idleTimer);
+      if (!currentUser) return;
+      idleTimer = setTimeout(() => {
+        showToast("Signed out due to inactivity.");
+        signOut(auth);
+      }, IDLE_MS);
+    }
+
+    ["mousemove","keydown","click","touchstart","scroll"].forEach(evt =>
+      document.addEventListener(evt, resetIdle, { passive: true })
+    );
 
     // ── Auth ─────────────────────────────────────────────────────────────────
     signInBtn.addEventListener("click", () => {
@@ -92,23 +116,53 @@
 
     signOutBtn.addEventListener("click", () => signOut(auth));
 
-    onAuthStateChanged(auth, user => {
+    onAuthStateChanged(auth, async user => {
       currentUser = user;
       if (user) {
+        await loadUserProfile(user.email);
         loginScreen.style.display = "none";
         appScreen.style.display   = "flex";
-        const m = memberInfo(user.email);
-        userBadge.textContent = m.initials;
+        const m = getProfile(user.email);
+        userBadge.textContent     = m.initials;
         userBadge.style.background = m.color;
+        userBadge.title = "Click to change your color";
+        resetIdle();
         startListening();
         initCalendar();
       } else {
+        clearTimeout(idleTimer);
         loginScreen.style.display = "flex";
         appScreen.style.display   = "none";
         if (unsubscribe) { unsubscribe(); unsubscribe = null; }
         if (calendar)    { calendar.destroy(); calendar = null; }
       }
     });
+
+    // ── Color picker ─────────────────────────────────────────────────────────
+    userBadge.addEventListener("click", () => {
+      if (!currentUser) return;
+      colorGrid.innerHTML = "";
+      PALETTE.forEach(hex => {
+        const swatch = document.createElement("button");
+        swatch.className = "color-swatch";
+        swatch.style.background = hex;
+        const current = getProfile(currentUser.email).color;
+        if (hex === current) swatch.classList.add("selected");
+        swatch.addEventListener("click", async () => {
+          await saveUserColor(currentUser.email, hex);
+          userBadge.style.background = hex;
+          colorModal.style.display = "none";
+          refreshCalendar();
+          refreshLegend();
+          showToast("Color updated.");
+        });
+        colorGrid.appendChild(swatch);
+      });
+      colorModal.style.display = "flex";
+    });
+
+    colorCancel.addEventListener("click", () => { colorModal.style.display = "none"; });
+    colorModal.addEventListener("click", e => { if (e.target === colorModal) colorModal.style.display = "none"; });
 
     // ── Firestore listener ───────────────────────────────────────────────────
     function startListening() {
@@ -121,16 +175,38 @@
       });
     }
 
+    // ── Convert stored events to FullCalendar format ──────────────────────────
+    // KEY FIX: FullCalendar's all-day end date is exclusive (it ends at midnight
+    // of the end date), so a 2-day event June 25–26 needs end = "2026-06-27".
+    // We store the INCLUSIVE end date and add 1 day when feeding FullCalendar.
+    function toFCEnd(endStr, allDay) {
+      if (!endStr) return null;
+      if (!allDay) return endStr;
+      // Add one day to make FullCalendar show the correct inclusive end
+      const d = new Date(endStr + "T00:00:00");
+      d.setDate(d.getDate() + 1);
+      return d.toISOString().slice(0,10);
+    }
+
+    // When saving, convert FC's exclusive end back to our inclusive end date
+    function fromFCEnd(endStr, allDay) {
+      if (!endStr) return null;
+      if (!allDay) return endStr;
+      const d = new Date(endStr + "T00:00:00");
+      d.setDate(d.getDate() - 1);
+      return d.toISOString().slice(0,10);
+    }
+
     function fcEvents() {
       return Object.values(allEvents).map(e => {
-        const m = memberInfo(e.createdBy);
+        const m = getProfile(e.createdBy);
         return {
-          id:        e.id,
-          title:     e.title,
-          start:     e.start,
-          end:       e.end || null,
-          allDay:    e.allDay,
-          color:     m.color,
+          id:       e.id,
+          title:    e.title,
+          start:    e.start,
+          end:      toFCEnd(e.end, e.allDay),
+          allDay:   e.allDay,
+          color:    m.color,
           extendedProps: { notes: e.notes, createdBy: e.createdBy, initials: m.initials }
         };
       });
@@ -140,58 +216,93 @@
     function initCalendar() {
       if (calendar) return;
       calendar = new FullCalendar.Calendar(calendarEl, {
-        initialView:   window.innerWidth < 640 ? "listWeek" : "dayGridMonth",
+        initialView:  window.innerWidth < 640 ? "listWeek" : "dayGridMonth",
         headerToolbar: {
           left:   "prev,next today",
           center: "title",
           right:  "dayGridMonth,timeGridWeek,timeGridDay,listWeek"
         },
-        buttonText: { listWeek: "list" },
-        height:      "100%",
-        editable:    true,
-        selectable:  true,
-        eventDisplay:"block",
-
-        // Click empty date → new event
-        dateClick(info) {
-          openModal(null, info.dateStr);
+        buttonText: {
+          today:   "Today",
+          month:   "Month",
+          week:    "Week",
+          day:     "Day",
+          listWeek:"List"
         },
-        // Click existing event → edit
+        // Show day numbers and week grid in month view
+        dayHeaders:      true,
+        dayCellContent:  (arg) => ({ html: `<span class="fc-daygrid-day-number">${arg.date.getDate()}</span>` }),
+        height:          "100%",
+        editable:        true,
+        selectable:      true,
+        selectMirror:    true,
+        eventDisplay:    "block",
+        // Allow dragging backwards in time
+        dragRevertDuration: 0,
+
+        dateClick(info) {
+          openModal(null, info.dateStr, null, true);
+        },
         eventClick(info) {
+          hideTooltip();
           openModal(allEvents[info.event.id]);
         },
-        // Drag-to-create
         select(info) {
-          openModal(null, info.startStr, info.endStr, info.allDay);
+          // FC select end is exclusive for allDay — store inclusive
+          const endInclusive = info.allDay && info.endStr
+            ? fromFCEnd(info.endStr, true)
+            : info.endStr;
+          openModal(null, info.startStr, endInclusive, info.allDay);
         },
-        // Drag to reschedule
         eventDrop(info) {
           const e = info.event;
           updateDoc(doc(db,"events",e.id), {
             start:  e.startStr,
-            end:    e.endStr || null,
+            end:    fromFCEnd(e.endStr, e.allDay),
             allDay: e.allDay
           }).catch(() => { info.revert(); showToast("Couldn't save change.", true); });
         },
-        // Resize
         eventResize(info) {
           const e = info.event;
           updateDoc(doc(db,"events",e.id), {
             start: e.startStr,
-            end:   e.endStr || null
+            end:   fromFCEnd(e.endStr, e.allDay)
           }).catch(() => { info.revert(); showToast("Couldn't save change.", true); });
         },
-        // Render initials badge on each event
         eventDidMount(info) {
+          // Initials badge
           const badge = document.createElement("span");
-          badge.className = "fc-initials";
+          badge.className   = "fc-initials";
           badge.textContent = info.event.extendedProps.initials;
           info.el.querySelector(".fc-event-title")?.prepend(badge);
+
+          // Hover tooltip showing notes
+          let hoverTimer = null;
+          info.el.addEventListener("mouseenter", () => {
+            const notes = info.event.extendedProps.notes;
+            if (!notes) return;
+            hoverTimer = setTimeout(() => {
+              const rect = info.el.getBoundingClientRect();
+              tooltip.innerHTML = `<strong>${info.event.title}</strong><br>${notes}`;
+              tooltip.style.display = "block";
+              tooltip.style.left = Math.min(rect.left, window.innerWidth - 240) + "px";
+              tooltip.style.top  = (rect.bottom + 6) + "px";
+            }, 900);
+          });
+          info.el.addEventListener("mouseleave", () => {
+            clearTimeout(hoverTimer);
+            hideTooltip();
+          });
         },
         events: fcEvents()
       });
       calendar.render();
     }
+
+    function hideTooltip() {
+      tooltip.style.display = "none";
+    }
+    document.addEventListener("scroll", hideTooltip, true);
 
     function refreshCalendar() {
       if (!calendar) return;
@@ -206,7 +317,7 @@
       if (currentUser) seen[currentUser.email] = true;
       legendEl.innerHTML = "";
       Object.keys(seen).forEach(email => {
-        const m = memberInfo(email);
+        const m = getProfile(email);
         const chip = document.createElement("span");
         chip.className = "legend-chip";
         chip.innerHTML = `<span class="legend-dot" style="background:${m.color}"></span>${m.name}`;
@@ -232,12 +343,21 @@
       const isAll = fAllDay.checked;
       fStart.type = isAll ? "date" : "datetime-local";
       fEnd.type   = isAll ? "date" : "datetime-local";
+      // Re-populate values sensibly when toggling
+      if (fStart.value) {
+        const base = fStart.value.slice(0,10);
+        fStart.value = isAll ? base : base + "T09:00";
+      }
+      if (fEnd.value) {
+        const base = fEnd.value.slice(0,10);
+        fEnd.value = isAll ? base : base + "T10:00";
+      }
     });
 
     function openModal(event, defaultStart, defaultEnd, defaultAllDay) {
       form.reset();
+      hideTooltip();
       if (event) {
-        // Editing existing
         modalTitle.textContent = "Edit entry";
         fId.value    = event.id;
         fTitle.value = event.title;
@@ -245,25 +365,30 @@
         fAllDay.checked = !!event.allDay;
         fAllDay.dispatchEvent(new Event("change"));
         fStart.value = event.allDay ? toDateInput(event.start) : toDatetimeLocal(event.start);
-        fEnd.value   = event.end ? (event.allDay ? toDateInput(event.end) : toDatetimeLocal(event.end)) : "";
-        deleteBtn.hidden = false;
+        fEnd.value   = event.end
+          ? (event.allDay ? toDateInput(event.end) : toDatetimeLocal(event.end))
+          : "";
+        deleteBtn.style.display = "inline-flex";
       } else {
-        // New event
-        modalTitle.textContent = "New entry";
+        modalTitle.textContent  = "New entry";
         fId.value = "";
-        const allDay = defaultAllDay !== undefined ? defaultAllDay : !defaultStart?.includes("T");
+        const allDay = defaultAllDay !== undefined ? defaultAllDay : true;
         fAllDay.checked = allDay;
         fAllDay.dispatchEvent(new Event("change"));
-        fStart.value = allDay ? toDateInput(defaultStart) : toDatetimeLocal(defaultStart);
-        fEnd.value   = defaultEnd ? (allDay ? toDateInput(defaultEnd) : toDatetimeLocal(defaultEnd)) : "";
-        deleteBtn.hidden = true;
+        if (defaultStart) {
+          fStart.value = allDay ? defaultStart.slice(0,10) : toDatetimeLocal(defaultStart);
+        }
+        if (defaultEnd) {
+          fEnd.value = allDay ? defaultEnd.slice(0,10) : toDatetimeLocal(defaultEnd);
+        }
+        deleteBtn.style.display = "none";
       }
-      modal.hidden = false;
+      modal.style.display = "flex";
       fTitle.focus();
     }
 
-    cancelBtn.addEventListener("click", () => { modal.hidden = true; });
-    modal.addEventListener("click", e => { if (e.target === modal) modal.hidden = true; });
+    cancelBtn.addEventListener("click", () => { modal.style.display = "none"; });
+    modal.addEventListener("click", e => { if (e.target === modal) modal.style.display = "none"; });
 
     // ── Save ─────────────────────────────────────────────────────────────────
     form.addEventListener("submit", async e => {
@@ -289,7 +414,7 @@
           await addDoc(collection(db,"events"), payload);
           showToast("Entry added.");
         }
-        modal.hidden = true;
+        modal.style.display = "none";
       } catch(err) {
         showToast("Couldn't save: " + err.message, true);
       }
@@ -301,7 +426,7 @@
       if (!confirm("Delete this entry?")) return;
       try {
         await deleteDoc(doc(db,"events",fId.value));
-        modal.hidden = true;
+        modal.style.display = "none";
         showToast("Entry deleted.");
       } catch(err) {
         showToast("Couldn't delete: " + err.message, true);
@@ -312,7 +437,7 @@
     document.getElementById("btn-add").addEventListener("click", () => {
       const today = new Date();
       const iso = `${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
-      openModal(null, iso);
+      openModal(null, iso, null, true);
     });
 
     // ── Toast ────────────────────────────────────────────────────────────────
@@ -325,23 +450,20 @@
   </script>
 
   <style>
-    /* ── Reset & tokens ───────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    /* Ensure hidden attribute always hides elements, even if CSS flex overrides it */
     [hidden] { display: none !important; }
 
     :root {
-      --bg:        #F8F7F4;
-      --surface:   #FFFFFF;
-      --border:    #E2DDD6;
-      --text:      #1A1814;
-      --muted:     #6B6560;
-      --accent:    #2563EB;
-      --danger:    #DC2626;
-      --radius:    10px;
-      --font:      "Inter", system-ui, sans-serif;
-      --shadow:    0 4px 24px rgba(0,0,0,0.10);
+      --bg:      #F8F7F4;
+      --surface: #FFFFFF;
+      --border:  #E2DDD6;
+      --text:    #1A1814;
+      --muted:   #6B6560;
+      --accent:  #2563EB;
+      --danger:  #DC2626;
+      --radius:  10px;
+      --font:    "Inter", system-ui, sans-serif;
+      --shadow:  0 4px 24px rgba(0,0,0,0.10);
     }
 
     @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
@@ -355,14 +477,13 @@
       flex-direction: column;
     }
 
-    /* ── Screen visibility (JS controls these) */
+    /* ── Screen visibility — JS controls these ───────────────────────────── */
     #login-screen { display: none; }
     #app-screen   { display: none; }
 
-    /* ── Login screen ─────────────────────────────────────────────────────── */
+    /* ── Login ───────────────────────────────────────────────────────────── */
     #login-screen {
       flex: 1;
-      display: flex;
       align-items: center;
       justify-content: center;
       padding: 1.5rem;
@@ -379,33 +500,18 @@
       box-shadow: var(--shadow);
     }
 
-    .login-card .home-icon {
-      font-size: 2.5rem;
-      margin-bottom: 0.75rem;
-      display: block;
-    }
+    .login-card .home-icon { font-size: 2.5rem; margin-bottom: 0.75rem; display: block; }
+    .login-card h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .login-card p  { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
 
-    .login-card h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      margin-bottom: 0.25rem;
-    }
-
-    .login-card p {
-      color: var(--muted);
-      font-size: 0.9rem;
-      margin-bottom: 2rem;
-    }
-
-    /* ── App shell ────────────────────────────────────────────────────────── */
+    /* ── App shell ───────────────────────────────────────────────────────── */
     #app-screen {
       flex: 1;
-      display: flex;
       flex-direction: column;
       min-height: 0;
     }
 
-    /* ── Top bar ──────────────────────────────────────────────────────────── */
+    /* ── Header ──────────────────────────────────────────────────────────── */
     header {
       background: var(--surface);
       border-bottom: 1px solid var(--border);
@@ -416,246 +522,184 @@
       flex-wrap: wrap;
     }
 
-    header h1 {
-      font-size: 1.05rem;
-      font-weight: 700;
-      flex: 1;
-      white-space: nowrap;
-    }
+    header h1 { font-size: 1.05rem; font-weight: 700; flex: 1; white-space: nowrap; }
 
-    #legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      align-items: center;
-    }
+    #legend { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 
     .legend-chip {
-      display: flex;
-      align-items: center;
-      gap: 0.3rem;
-      font-size: 0.78rem;
-      color: var(--muted);
+      display: flex; align-items: center; gap: 0.3rem;
+      font-size: 0.78rem; color: var(--muted);
     }
 
     .legend-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      display: inline-block;
-      flex-shrink: 0;
+      width: 10px; height: 10px; border-radius: 50%;
+      display: inline-block; flex-shrink: 0;
     }
 
-    .header-right {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
+    .header-right { display: flex; align-items: center; gap: 0.5rem; }
 
     #user-badge {
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      color: #fff;
-      font-size: 0.7rem;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
+      width: 32px; height: 32px; border-radius: 50%;
+      color: #fff; font-size: 0.7rem; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; cursor: pointer;
+      border: 2px solid transparent;
+      transition: border-color 0.15s;
     }
+    #user-badge:hover { border-color: var(--text); }
 
-    /* ── Calendar wrapper ─────────────────────────────────────────────────── */
-    #calendar-wrap {
-      flex: 1;
-      padding: 1rem;
-      min-height: 0;
-      overflow: auto;
-    }
+    /* ── Calendar wrapper ────────────────────────────────────────────────── */
+    #calendar-wrap { flex: 1; padding: 1rem; min-height: 0; overflow: auto; }
+    #calendar { height: calc(100dvh - 120px); }
 
-    #calendar {
-      height: calc(100dvh - 120px);
-    }
-
-    /* ── FullCalendar overrides ───────────────────────────────────────────── */
+    /* ── FullCalendar overrides ──────────────────────────────────────────── */
     .fc .fc-toolbar-title    { font-size: 1rem !important; font-weight: 700; }
-    .fc .fc-button            { font-size: 0.78rem !important; padding: 0.3em 0.6em !important; border-radius: 6px !important; }
+    .fc .fc-button            { font-size: 0.8rem !important; padding: 0.3em 0.7em !important; border-radius: 6px !important; text-transform: capitalize; }
     .fc .fc-button-primary    { background: var(--accent) !important; border-color: var(--accent) !important; }
     .fc .fc-button-primary:not(.fc-button-active):hover { filter: brightness(1.1); }
     .fc .fc-button-active     { background: #1e3a8a !important; border-color: #1e3a8a !important; }
     .fc-event                 { border-radius: 5px !important; border: none !important; font-size: 0.78rem !important; cursor: pointer; }
     .fc-initials              { font-size: 0.65rem; background: rgba(0,0,0,0.18); border-radius: 3px; padding: 0 3px; margin-right: 3px; vertical-align: middle; color: #fff; }
     .fc-daygrid-day:hover .fc-daygrid-day-frame { background: rgba(37,99,235,0.04); }
+    /* Show day numbers clearly in month view */
+    .fc .fc-daygrid-day-number { font-size: 0.85rem; font-weight: 500; padding: 4px 6px; }
+    .fc .fc-col-header-cell-cushion { font-weight: 600; font-size: 0.82rem; }
 
-    /* ── Buttons ──────────────────────────────────────────────────────────── */
+    /* ── Buttons ─────────────────────────────────────────────────────────── */
     .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.3rem;
-      padding: 0.45rem 0.9rem;
-      border-radius: var(--radius);
-      font-size: 0.85rem;
-      font-weight: 600;
-      cursor: pointer;
-      border: none;
-      transition: filter 0.15s;
-      text-decoration: none;
-      white-space: nowrap;
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      padding: 0.45rem 0.9rem; border-radius: var(--radius);
+      font-size: 0.85rem; font-weight: 600; cursor: pointer;
+      border: none; transition: filter 0.15s; text-decoration: none; white-space: nowrap;
     }
-    .btn:hover { filter: brightness(1.08); }
-    .btn-primary   { background: var(--accent); color: #fff; }
-    .btn-ghost     { background: transparent; color: var(--muted); border: 1px solid var(--border); }
-    .btn-danger    { background: var(--danger); color: #fff; }
+    .btn:hover       { filter: brightness(1.08); }
+    .btn-primary     { background: var(--accent); color: #fff; }
+    .btn-ghost       { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    .btn-danger      { background: var(--danger); color: #fff; }
     .btn-google {
-      background: #fff;
-      color: #3c4043;
-      border: 1px solid var(--border);
-      font-size: 0.95rem;
-      padding: 0.65rem 1.2rem;
-      border-radius: 8px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      background: #fff; color: #3c4043; border: 1px solid var(--border);
+      font-size: 0.95rem; padding: 0.65rem 1.2rem;
+      border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
     .btn-google svg { width: 18px; height: 18px; }
 
-    /* ── Modal ────────────────────────────────────────────────────────────── */
+    /* ── Event modal ─────────────────────────────────────────────────────── */
     #event-modal {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.45);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 1rem;
-      z-index: 1000;
+      position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+      align-items: center; justify-content: center;
+      padding: 1rem; z-index: 1000; display: none;
     }
-
-    #event-modal[hidden] { display: none; }
 
     .modal-card {
-      background: var(--surface);
-      border-radius: var(--radius);
-      width: 100%;
-      max-width: 440px;
-      padding: 1.5rem;
-      box-shadow: var(--shadow);
+      background: var(--surface); border-radius: var(--radius);
+      width: 100%; max-width: 440px; padding: 1.5rem; box-shadow: var(--shadow);
     }
 
-    .modal-card h2 {
-      font-size: 1.05rem;
-      font-weight: 700;
-      margin-bottom: 1.25rem;
-    }
+    .modal-card h2 { font-size: 1.05rem; font-weight: 700; margin-bottom: 1.25rem; }
 
-    /* ── Form ─────────────────────────────────────────────────────────────── */
+    /* ── Form ────────────────────────────────────────────────────────────── */
     .field { margin-bottom: 1rem; }
 
     label {
-      display: block;
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--muted);
-      margin-bottom: 0.3rem;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
+      display: block; font-size: 0.8rem; font-weight: 600;
+      color: var(--muted); margin-bottom: 0.3rem;
+      text-transform: uppercase; letter-spacing: 0.04em;
     }
 
     input[type="text"],
     input[type="date"],
     input[type="datetime-local"],
     textarea {
-      width: 100%;
-      padding: 0.55rem 0.75rem;
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      font-size: 0.9rem;
-      font-family: var(--font);
-      background: var(--bg);
-      color: var(--text);
-      transition: border-color 0.15s;
+      width: 100%; padding: 0.55rem 0.75rem;
+      border: 1px solid var(--border); border-radius: 7px;
+      font-size: 0.9rem; font-family: var(--font);
+      background: var(--bg); color: var(--text); transition: border-color 0.15s;
     }
 
     input:focus, textarea:focus {
-      outline: none;
-      border-color: var(--accent);
+      outline: none; border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
     }
 
     textarea { resize: vertical; min-height: 70px; }
 
-    .field-row {
-      display: flex;
-      gap: 0.75rem;
-    }
-
+    .field-row { display: flex; gap: 0.75rem; }
     .field-row .field { flex: 1; }
 
     .allday-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-bottom: 1rem;
+      display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;
     }
+    .allday-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+    .allday-row label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 0.88rem; font-weight: 500; color: var(--text); cursor: pointer; }
 
-    .allday-row input[type="checkbox"] {
-      width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer;
-    }
-
-    .allday-row label {
-      margin: 0; text-transform: none; letter-spacing: 0;
-      font-size: 0.88rem; font-weight: 500; color: var(--text); cursor: pointer;
-    }
-
-    .modal-actions {
-      display: flex;
-      gap: 0.5rem;
-      margin-top: 1.25rem;
-      flex-wrap: wrap;
-    }
-
+    .modal-actions { display: flex; gap: 0.5rem; margin-top: 1.25rem; flex-wrap: wrap; }
     .modal-actions .btn-danger { margin-left: auto; }
 
-    /* ── Toast ────────────────────────────────────────────────────────────── */
+    /* ── Color picker modal ──────────────────────────────────────────────── */
+    #color-modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+      align-items: center; justify-content: center;
+      padding: 1rem; z-index: 1100; display: none;
+    }
+
+    .color-card {
+      background: var(--surface); border-radius: var(--radius);
+      padding: 1.5rem; box-shadow: var(--shadow); max-width: 320px; width: 100%;
+    }
+
+    .color-card h2 { font-size: 1rem; font-weight: 700; margin-bottom: 1rem; }
+
+    #color-grid {
+      display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.6rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .color-swatch {
+      width: 40px; height: 40px; border-radius: 50%; border: 3px solid transparent;
+      cursor: pointer; transition: transform 0.15s, border-color 0.15s;
+    }
+    .color-swatch:hover   { transform: scale(1.15); }
+    .color-swatch.selected { border-color: var(--text); }
+
+    /* ── Hover tooltip ───────────────────────────────────────────────────── */
+    #event-tooltip {
+      position: fixed; display: none; z-index: 900;
+      background: #1A1814; color: #fff;
+      padding: 0.6rem 0.85rem; border-radius: 8px;
+      font-size: 0.82rem; line-height: 1.5;
+      max-width: 220px; pointer-events: none;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    }
+
+    /* ── Toast ───────────────────────────────────────────────────────────── */
     .toast {
-      position: fixed;
-      bottom: 1.5rem;
-      left: 50%;
+      position: fixed; bottom: 1.5rem; left: 50%;
       transform: translateX(-50%) translateY(80px);
-      background: #1A1814;
-      color: #fff;
-      padding: 0.65rem 1.2rem;
-      border-radius: 8px;
-      font-size: 0.88rem;
-      font-weight: 500;
-      opacity: 0;
-      transition: all 0.25s ease;
-      z-index: 2000;
-      white-space: nowrap;
+      background: #1A1814; color: #fff;
+      padding: 0.65rem 1.2rem; border-radius: 8px;
+      font-size: 0.88rem; font-weight: 500;
+      opacity: 0; transition: all 0.25s ease;
+      z-index: 2000; white-space: nowrap;
     }
-
-    .toast.show {
-      opacity: 1;
-      transform: translateX(-50%) translateY(0);
-    }
-
+    .toast.show  { opacity: 1; transform: translateX(-50%) translateY(0); }
     .toast.error { background: var(--danger); }
 
-    /* ── Mobile ───────────────────────────────────────────────────────────── */
+    /* ── Mobile ──────────────────────────────────────────────────────────── */
     @media (max-width: 640px) {
-      header h1 { font-size: 0.95rem; }
-      #legend   { display: none; }
+      header h1  { font-size: 0.9rem; }
+      #legend    { display: none; }
       .field-row { flex-direction: column; gap: 0; }
-      #calendar { height: calc(100dvh - 100px); }
+      #calendar  { height: calc(100dvh - 100px); }
     }
   </style>
 </head>
-
 <body>
 
-  <!-- ── Login ────────────────────────────────────────────────────────────── -->
+  <!-- ── Login ──────────────────────────────────────────────────────────────── -->
   <div id="login-screen">
     <div class="login-card">
       <span class="home-icon">🏠</span>
-      <h1>Family Calendar</h1>
+      <h1>Ramchandran Family Calendar</h1>
       <p>Sign in to view and manage the family schedule.</p>
       <button id="btn-signin" class="btn btn-google">
         <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
@@ -669,42 +713,36 @@
     </div>
   </div>
 
-  <!-- ── App ──────────────────────────────────────────────────────────────── -->
+  <!-- ── App ────────────────────────────────────────────────────────────────── -->
   <div id="app-screen">
-
     <header>
-      <h1>🏠 Family Calendar</h1>
+      <h1>🏠 Ramchandran Family Calendar</h1>
       <div id="legend"></div>
       <div class="header-right">
         <button id="btn-add" class="btn btn-primary">+ Add</button>
-        <div id="user-badge"></div>
+        <div id="user-badge" title="Click to change your color"></div>
         <button id="btn-signout" class="btn btn-ghost">Sign out</button>
       </div>
     </header>
-
     <div id="calendar-wrap">
       <div id="calendar"></div>
     </div>
-
   </div>
 
-  <!-- ── Event modal ───────────────────────────────────────────────────────── -->
-  <div id="event-modal" hidden role="dialog" aria-modal="true">
+  <!-- ── Event modal ────────────────────────────────────────────────────────── -->
+  <div id="event-modal" role="dialog" aria-modal="true">
     <div class="modal-card">
       <h2 id="modal-title">New entry</h2>
       <form id="event-form" novalidate>
         <input type="hidden" id="f-id" />
-
         <div class="field">
           <label for="f-title">What</label>
           <input type="text" id="f-title" placeholder="Dentist, School play, Flight to Miami…" required />
         </div>
-
         <div class="allday-row">
           <input type="checkbox" id="f-allday" checked />
           <label for="f-allday">All-day event</label>
         </div>
-
         <div class="field-row">
           <div class="field">
             <label for="f-start">Start</label>
@@ -715,12 +753,10 @@
             <input type="date" id="f-end" />
           </div>
         </div>
-
         <div class="field">
           <label for="f-notes">Notes (optional)</label>
           <textarea id="f-notes" placeholder="Address, confirmation number, reminder…"></textarea>
         </div>
-
         <div class="modal-actions">
           <button type="submit" class="btn btn-primary">Save</button>
           <button type="button" id="btn-cancel" class="btn btn-ghost">Cancel</button>
@@ -730,7 +766,19 @@
     </div>
   </div>
 
-  <!-- ── Toast ────────────────────────────────────────────────────────────── -->
+  <!-- ── Color picker modal ─────────────────────────────────────────────────── -->
+  <div id="color-modal" role="dialog" aria-modal="true">
+    <div class="color-card">
+      <h2>Choose your color</h2>
+      <div id="color-grid"></div>
+      <button id="btn-color-cancel" class="btn btn-ghost" style="width:100%">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ── Hover tooltip ──────────────────────────────────────────────────────── -->
+  <div id="event-tooltip"></div>
+
+  <!-- ── Toast ──────────────────────────────────────────────────────────────── -->
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 </body>
