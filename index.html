@@ -95,16 +95,16 @@
     onAuthStateChanged(auth, user => {
       currentUser = user;
       if (user) {
-        loginScreen.hidden = true;
-        appScreen.hidden   = false;
+        loginScreen.style.display = "none";
+        appScreen.style.display   = "flex";
         const m = memberInfo(user.email);
         userBadge.textContent = m.initials;
         userBadge.style.background = m.color;
         startListening();
         initCalendar();
       } else {
-        loginScreen.hidden = false;
-        appScreen.hidden   = true;
+        loginScreen.style.display = "flex";
+        appScreen.style.display   = "none";
         if (unsubscribe) { unsubscribe(); unsubscribe = null; }
         if (calendar)    { calendar.destroy(); calendar = null; }
       }
@@ -354,6 +354,10 @@
       display: flex;
       flex-direction: column;
     }
+
+    /* ── Screen visibility (JS controls these) */
+    #login-screen { display: none; }
+    #app-screen   { display: none; }
 
     /* ── Login screen ─────────────────────────────────────────────────────── */
     #login-screen {
@@ -666,7 +670,7 @@
   </div>
 
   <!-- ── App ──────────────────────────────────────────────────────────────── -->
-  <div id="app-screen" hidden>
+  <div id="app-screen">
 
     <header>
       <h1>🏠 Family Calendar</h1>
