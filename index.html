@@ -5,11 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Ramchandran Family Calendar</title>
 
-  <!-- FullCalendar -->
   <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.js"></script>
 
-  <!-- Firebase -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import {
@@ -20,7 +18,6 @@
       doc, onSnapshot, query, orderBy, setDoc, getDoc
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
-    // ── Firebase config ──────────────────────────────────────────────────────
     const firebaseConfig = {
       apiKey: "AIzaSyBvRAMAyamcqCZcK-8AA3P2jTuEH1Qw-MU",
       authDomain: "family-calendar-f17df.firebaseapp.com",
@@ -34,32 +31,38 @@
     const auth = getAuth(app);
     const db   = getFirestore(app);
 
-    // ── Default colors palette ───────────────────────────────────────────────
-    const PALETTE = ["#2563EB","#7C3AED","#059669","#D97706","#DC2626","#0891B2","#BE185D","#92400E","#065F46","#1E3A5F"];
-    const userProfiles = {};   // email → { name, initials, color }
+    // ── Color palette & user profiles ────────────────────────────────────────
+    const PALETTE = [
+      "#2563EB","#7C3AED","#059669","#D97706","#DC2626",
+      "#0891B2","#BE185D","#92400E","#065F46","#1E3A5F"
+    ];
+    const userProfiles = {};
     let colorIdx = 0;
 
     function getProfile(email) {
       if (userProfiles[email]) return userProfiles[email];
-      const parts  = (email || "?").split("@")[0].split(/[.\-_]/);
-      const initials = parts.slice(0,2).map(p => (p[0] || "?").toUpperCase()).join("");
-      const name   = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
+      const parts    = (email || "?").split("@")[0].split(/[.\-_]/);
+      const initials = parts.slice(0,2).map(p => (p[0]||"?").toUpperCase()).join("");
+      const name     = parts.map(p => p.charAt(0).toUpperCase()+p.slice(1)).join(" ");
       userProfiles[email] = { name, initials, color: PALETTE[colorIdx++ % PALETTE.length] };
       return userProfiles[email];
     }
 
     async function loadUserProfile(email) {
       try {
-        const snap = await getDoc(doc(db, "userProfiles", email));
+        const snap = await getDoc(doc(db,"userProfiles",email));
         if (snap.exists()) {
-          userProfiles[email] = { ...getProfile(email), ...snap.data() };
+          const base = getProfile(email);
+          userProfiles[email] = { ...base, ...snap.data() };
+        } else {
+          getProfile(email); // ensure default exists
         }
-      } catch(e) { /* ignore — use default */ }
+      } catch(e) { getProfile(email); }
     }
 
     async function saveUserColor(email, color) {
       userProfiles[email] = { ...getProfile(email), color };
-      await setDoc(doc(db, "userProfiles", email), { color }, { merge: true });
+      await setDoc(doc(db,"userProfiles",email), { color }, { merge: true });
     }
 
     // ── State ────────────────────────────────────────────────────────────────
@@ -68,34 +71,34 @@
     let allEvents   = {};
     let unsubscribe = null;
     let idleTimer   = null;
-    const IDLE_MS   = 10 * 60 * 1000;  // 10 minutes
+    const IDLE_MS   = 10 * 60 * 1000;
 
     // ── DOM refs ─────────────────────────────────────────────────────────────
-    const loginScreen   = document.getElementById("login-screen");
-    const appScreen     = document.getElementById("app-screen");
-    const calendarEl    = document.getElementById("calendar");
-    const modal         = document.getElementById("event-modal");
-    const modalTitle    = document.getElementById("modal-title");
-    const form          = document.getElementById("event-form");
-    const fTitle        = document.getElementById("f-title");
-    const fStart        = document.getElementById("f-start");
-    const fEnd          = document.getElementById("f-end");
-    const fAllDay       = document.getElementById("f-allday");
-    const fNotes        = document.getElementById("f-notes");
-    const fId           = document.getElementById("f-id");
-    const deleteBtn     = document.getElementById("btn-delete");
-    const cancelBtn     = document.getElementById("btn-cancel");
-    const userBadge     = document.getElementById("user-badge");
-    const signOutBtn    = document.getElementById("btn-signout");
-    const signInBtn     = document.getElementById("btn-signin");
-    const legendEl      = document.getElementById("legend");
-    const toast         = document.getElementById("toast");
-    const colorModal    = document.getElementById("color-modal");
-    const colorGrid     = document.getElementById("color-grid");
-    const colorCancel   = document.getElementById("btn-color-cancel");
-    const tooltip       = document.getElementById("event-tooltip");
+    const loginScreen = document.getElementById("login-screen");
+    const appScreen   = document.getElementById("app-screen");
+    const calendarEl  = document.getElementById("calendar");
+    const modal       = document.getElementById("event-modal");
+    const modalTitle  = document.getElementById("modal-title");
+    const form        = document.getElementById("event-form");
+    const fTitle      = document.getElementById("f-title");
+    const fStart      = document.getElementById("f-start");
+    const fEnd        = document.getElementById("f-end");
+    const fAllDay     = document.getElementById("f-allday");
+    const fNotes      = document.getElementById("f-notes");
+    const fId         = document.getElementById("f-id");
+    const deleteBtn   = document.getElementById("btn-delete");
+    const cancelBtn   = document.getElementById("btn-cancel");
+    const userBadge   = document.getElementById("user-badge");
+    const signOutBtn  = document.getElementById("btn-signout");
+    const signInBtn   = document.getElementById("btn-signin");
+    const legendEl    = document.getElementById("legend");
+    const toast       = document.getElementById("toast");
+    const colorModal  = document.getElementById("color-modal");
+    const colorGrid   = document.getElementById("color-grid");
+    const colorCancel = document.getElementById("btn-color-cancel");
+    const tooltip     = document.getElementById("event-tooltip");
 
-    // ── Idle auto-logout ─────────────────────────────────────────────────────
+    // ── Idle timer ───────────────────────────────────────────────────────────
     function resetIdle() {
       clearTimeout(idleTimer);
       if (!currentUser) return;
@@ -104,16 +107,14 @@
         signOut(auth);
       }, IDLE_MS);
     }
-
     ["mousemove","keydown","click","touchstart","scroll"].forEach(evt =>
       document.addEventListener(evt, resetIdle, { passive: true })
     );
 
     // ── Auth ─────────────────────────────────────────────────────────────────
-    signInBtn.addEventListener("click", () => {
-      signInWithPopup(auth, new GoogleAuthProvider()).catch(e => showToast(e.message, true));
-    });
-
+    signInBtn.addEventListener("click", () =>
+      signInWithPopup(auth, new GoogleAuthProvider()).catch(e => showToast(e.message, true))
+    );
     signOutBtn.addEventListener("click", () => signOut(auth));
 
     onAuthStateChanged(auth, async user => {
@@ -123,9 +124,8 @@
         loginScreen.style.display = "none";
         appScreen.style.display   = "flex";
         const m = getProfile(user.email);
-        userBadge.textContent     = m.initials;
+        userBadge.textContent      = m.initials;
         userBadge.style.background = m.color;
-        userBadge.title = "Click to change your color";
         resetIdle();
         startListening();
         initCalendar();
@@ -141,32 +141,62 @@
     // ── Color picker ─────────────────────────────────────────────────────────
     userBadge.addEventListener("click", () => {
       if (!currentUser) return;
-      colorGrid.innerHTML = "";
-      PALETTE.forEach(hex => {
-        const swatch = document.createElement("button");
-        swatch.className = "color-swatch";
-        swatch.style.background = hex;
-        const current = getProfile(currentUser.email).color;
-        if (hex === current) swatch.classList.add("selected");
-        swatch.addEventListener("click", async () => {
-          await saveUserColor(currentUser.email, hex);
-          userBadge.style.background = hex;
-          colorModal.style.display = "none";
-          refreshCalendar();
-          refreshLegend();
-          showToast("Color updated.");
-        });
-        colorGrid.appendChild(swatch);
-      });
+      renderColorGrid();
       colorModal.style.display = "flex";
+    });
+
+    function renderColorGrid() {
+      colorGrid.innerHTML = "";
+      const current = getProfile(currentUser.email).color;
+      PALETTE.forEach(hex => {
+        const sw = document.createElement("button");
+        sw.type = "button";
+        sw.className = "color-swatch" + (hex === current ? " selected" : "");
+        sw.style.background = hex;
+        sw.title = hex;
+        sw.addEventListener("click", () => {
+          document.querySelectorAll(".color-swatch").forEach(s => s.classList.remove("selected"));
+          sw.classList.add("selected");
+        });
+        colorGrid.appendChild(sw);
+      });
+    }
+
+    document.getElementById("btn-color-save").addEventListener("click", async () => {
+      const selected = colorGrid.querySelector(".color-swatch.selected");
+      if (!selected) return;
+      const color = selected.style.background;
+      // Convert rgb() back to hex if browser normalized it
+      const hex = rgbToHex(color);
+      await saveUserColor(currentUser.email, hex);
+      userBadge.style.background = hex;
+      colorModal.style.display = "none";
+      // Update all existing events in the calendar to new color
+      if (calendar) {
+        calendar.getEvents().forEach(e => {
+          if (e.extendedProps.createdBy === currentUser.email) {
+            e.setProp("color", hex);
+          }
+        });
+      }
+      refreshLegend();
+      showToast("Color saved.");
     });
 
     colorCancel.addEventListener("click", () => { colorModal.style.display = "none"; });
     colorModal.addEventListener("click", e => { if (e.target === colorModal) colorModal.style.display = "none"; });
 
-    // ── Firestore listener ───────────────────────────────────────────────────
+    function rgbToHex(rgb) {
+      // If already a hex string, return as-is
+      if (rgb.startsWith("#")) return rgb;
+      const result = rgb.match(/\d+/g);
+      if (!result) return rgb;
+      return "#" + result.slice(0,3).map(n => parseInt(n).toString(16).padStart(2,"0")).join("");
+    }
+
+    // ── Firestore ────────────────────────────────────────────────────────────
     function startListening() {
-      const q = query(collection(db, "events"), orderBy("start"));
+      const q = query(collection(db,"events"), orderBy("start"));
       unsubscribe = onSnapshot(q, snap => {
         allEvents = {};
         snap.forEach(d => { allEvents[d.id] = { id: d.id, ...d.data() }; });
@@ -175,24 +205,21 @@
       });
     }
 
-    // ── Convert stored events to FullCalendar format ──────────────────────────
-    // KEY FIX: FullCalendar's all-day end date is exclusive (it ends at midnight
-    // of the end date), so a 2-day event June 25–26 needs end = "2026-06-27".
-    // We store the INCLUSIVE end date and add 1 day when feeding FullCalendar.
+    // ── End-date helpers ─────────────────────────────────────────────────────
+    // FullCalendar all-day end is EXCLUSIVE. We store INCLUSIVE end dates.
+    // So "Jun 25 – Jun 26" stored as end="2026-06-26", but FC needs end="2026-06-27".
     function toFCEnd(endStr, allDay) {
       if (!endStr) return null;
       if (!allDay) return endStr;
-      // Add one day to make FullCalendar show the correct inclusive end
-      const d = new Date(endStr + "T00:00:00");
+      const d = new Date(endStr + "T12:00:00");
       d.setDate(d.getDate() + 1);
       return d.toISOString().slice(0,10);
     }
 
-    // When saving, convert FC's exclusive end back to our inclusive end date
     function fromFCEnd(endStr, allDay) {
       if (!endStr) return null;
       if (!allDay) return endStr;
-      const d = new Date(endStr + "T00:00:00");
+      const d = new Date(endStr + "T12:00:00");
       d.setDate(d.getDate() - 1);
       return d.toISOString().slice(0,10);
     }
@@ -201,44 +228,40 @@
       return Object.values(allEvents).map(e => {
         const m = getProfile(e.createdBy);
         return {
-          id:       e.id,
-          title:    e.title,
-          start:    e.start,
-          end:      toFCEnd(e.end, e.allDay),
-          allDay:   e.allDay,
-          color:    m.color,
+          id:    e.id,
+          title: e.title,
+          start: e.start,
+          end:   toFCEnd(e.end, e.allDay),
+          allDay: e.allDay,
+          color: m.color,
           extendedProps: { notes: e.notes, createdBy: e.createdBy, initials: m.initials }
         };
       });
     }
 
-    // ── FullCalendar ─────────────────────────────────────────────────────────
+    // ── FullCalendar init ────────────────────────────────────────────────────
     function initCalendar() {
       if (calendar) return;
       calendar = new FullCalendar.Calendar(calendarEl, {
-        initialView:  window.innerWidth < 640 ? "listWeek" : "dayGridMonth",
+        initialView:  window.innerWidth < 640 ? "listMonth" : "dayGridMonth",
         headerToolbar: {
           left:   "prev,next today",
           center: "title",
-          right:  "dayGridMonth,timeGridWeek,timeGridDay,listWeek"
+          right:  "dayGridMonth,timeGridWeek,timeGridDay,listMonth"
         },
         buttonText: {
-          today:   "Today",
-          month:   "Month",
-          week:    "Week",
-          day:     "Day",
-          listWeek:"List"
+          today:     "Today",
+          month:     "Month",
+          week:      "Week",
+          day:       "Day",
+          listMonth: "List"
         },
-        // Show day numbers and week grid in month view
-        dayHeaders:      true,
-        dayCellContent:  (arg) => ({ html: `<span class="fc-daygrid-day-number">${arg.date.getDate()}</span>` }),
-        height:          "100%",
-        editable:        true,
-        selectable:      true,
-        selectMirror:    true,
-        eventDisplay:    "block",
-        // Allow dragging backwards in time
-        dragRevertDuration: 0,
+        height:      "100%",
+        editable:    true,
+        selectable:  true,
+        selectMirror: true,
+        // Show timed events in month view (not just all-day bar)
+        dayMaxEvents: false,
 
         dateClick(info) {
           openModal(null, info.dateStr, null, true);
@@ -248,10 +271,8 @@
           openModal(allEvents[info.event.id]);
         },
         select(info) {
-          // FC select end is exclusive for allDay — store inclusive
           const endInclusive = info.allDay && info.endStr
-            ? fromFCEnd(info.endStr, true)
-            : info.endStr;
+            ? fromFCEnd(info.endStr, true) : info.endStr;
           openModal(null, info.startStr, endInclusive, info.allDay);
         },
         eventDrop(info) {
@@ -276,7 +297,7 @@
           badge.textContent = info.event.extendedProps.initials;
           info.el.querySelector(".fc-event-title")?.prepend(badge);
 
-          // Hover tooltip showing notes
+          // Hover tooltip for notes
           let hoverTimer = null;
           info.el.addEventListener("mouseenter", () => {
             const notes = info.event.extendedProps.notes;
@@ -285,8 +306,9 @@
               const rect = info.el.getBoundingClientRect();
               tooltip.innerHTML = `<strong>${info.event.title}</strong><br>${notes}`;
               tooltip.style.display = "block";
-              tooltip.style.left = Math.min(rect.left, window.innerWidth - 240) + "px";
-              tooltip.style.top  = (rect.bottom + 6) + "px";
+              const left = Math.min(rect.left, window.innerWidth - 250);
+              tooltip.style.left = left + "px";
+              tooltip.style.top  = (rect.bottom + 8) + "px";
             }, 900);
           });
           info.el.addEventListener("mouseleave", () => {
@@ -299,9 +321,7 @@
       calendar.render();
     }
 
-    function hideTooltip() {
-      tooltip.style.display = "none";
-    }
+    function hideTooltip() { tooltip.style.display = "none"; }
     document.addEventListener("scroll", hideTooltip, true);
 
     function refreshCalendar() {
@@ -325,63 +345,61 @@
       });
     }
 
-    // ── Modal helpers ────────────────────────────────────────────────────────
+    // ── Form helpers ─────────────────────────────────────────────────────────
     function pad(s) { return String(s).padStart(2,"0"); }
 
     function toDatetimeLocal(iso) {
       if (!iso) return "";
+      // Handle both "2026-06-25T14:30:00" and "2026-06-25T14:30"
       const d = new Date(iso);
+      if (isNaN(d)) return "";
       return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     }
 
-    function toDateInput(iso) {
-      if (!iso) return "";
-      return iso.slice(0,10);
-    }
-
+    // Toggle between all-day and timed inputs
     fAllDay.addEventListener("change", () => {
       const isAll = fAllDay.checked;
       fStart.type = isAll ? "date" : "datetime-local";
       fEnd.type   = isAll ? "date" : "datetime-local";
-      // Re-populate values sensibly when toggling
-      if (fStart.value) {
-        const base = fStart.value.slice(0,10);
-        fStart.value = isAll ? base : base + "T09:00";
-      }
-      if (fEnd.value) {
-        const base = fEnd.value.slice(0,10);
-        fEnd.value = isAll ? base : base + "T10:00";
-      }
+      // Convert existing value sensibly
+      const sv = fStart.value;
+      const ev = fEnd.value;
+      if (sv) fStart.value = isAll ? sv.slice(0,10) : sv.slice(0,10) + "T09:00";
+      if (ev) fEnd.value   = isAll ? ev.slice(0,10) : ev.slice(0,10) + "T10:00";
     });
 
     function openModal(event, defaultStart, defaultEnd, defaultAllDay) {
       form.reset();
       hideTooltip();
+      // Always start as all-day, then adjust
+      fAllDay.checked = true;
+      fStart.type = "date";
+      fEnd.type   = "date";
+
       if (event) {
-        modalTitle.textContent = "Edit entry";
+        modalTitle.textContent  = "Edit entry";
         fId.value    = event.id;
         fTitle.value = event.title;
         fNotes.value = event.notes || "";
-        fAllDay.checked = !!event.allDay;
-        fAllDay.dispatchEvent(new Event("change"));
-        fStart.value = event.allDay ? toDateInput(event.start) : toDatetimeLocal(event.start);
+        const allDay = !!event.allDay;
+        fAllDay.checked = allDay;
+        fStart.type = allDay ? "date" : "datetime-local";
+        fEnd.type   = allDay ? "date" : "datetime-local";
+        fStart.value = allDay ? (event.start||"").slice(0,10) : toDatetimeLocal(event.start);
         fEnd.value   = event.end
-          ? (event.allDay ? toDateInput(event.end) : toDatetimeLocal(event.end))
+          ? (allDay ? (event.end||"").slice(0,10) : toDatetimeLocal(event.end))
           : "";
         deleteBtn.style.display = "inline-flex";
       } else {
         modalTitle.textContent  = "New entry";
         fId.value = "";
+        deleteBtn.style.display = "none";
         const allDay = defaultAllDay !== undefined ? defaultAllDay : true;
         fAllDay.checked = allDay;
-        fAllDay.dispatchEvent(new Event("change"));
-        if (defaultStart) {
-          fStart.value = allDay ? defaultStart.slice(0,10) : toDatetimeLocal(defaultStart);
-        }
-        if (defaultEnd) {
-          fEnd.value = allDay ? defaultEnd.slice(0,10) : toDatetimeLocal(defaultEnd);
-        }
-        deleteBtn.style.display = "none";
+        fStart.type = allDay ? "date" : "datetime-local";
+        fEnd.type   = allDay ? "date" : "datetime-local";
+        if (defaultStart) fStart.value = allDay ? defaultStart.slice(0,10) : toDatetimeLocal(defaultStart);
+        if (defaultEnd)   fEnd.value   = allDay ? defaultEnd.slice(0,10)   : toDatetimeLocal(defaultEnd);
       }
       modal.style.display = "flex";
       fTitle.focus();
@@ -394,7 +412,6 @@
     form.addEventListener("submit", async e => {
       e.preventDefault();
       if (!fTitle.value.trim()) { fTitle.focus(); return; }
-
       const payload = {
         title:     fTitle.value.trim(),
         start:     fStart.value,
@@ -404,7 +421,6 @@
         createdBy: currentUser.email,
         updatedAt: new Date().toISOString()
       };
-
       try {
         if (fId.value) {
           await updateDoc(doc(db,"events",fId.value), payload);
@@ -422,8 +438,7 @@
 
     // ── Delete ───────────────────────────────────────────────────────────────
     deleteBtn.addEventListener("click", async () => {
-      if (!fId.value) return;
-      if (!confirm("Delete this entry?")) return;
+      if (!fId.value || !confirm("Delete this entry?")) return;
       try {
         await deleteDoc(doc(db,"events",fId.value));
         modal.style.display = "none";
@@ -440,8 +455,8 @@
       openModal(null, iso, null, true);
     });
 
-    // ── Toast ────────────────────────────────────────────────────────────────
-    function showToast(msg, isError = false) {
+    // ── Toast ─────────────────────────────────────────────────────────────────
+    function showToast(msg, isError=false) {
       toast.textContent = msg;
       toast.className   = "toast show" + (isError ? " error" : "");
       setTimeout(() => { toast.className = "toast"; }, 3000);
@@ -451,7 +466,6 @@
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    [hidden] { display: none !important; }
 
     :root {
       --bg:      #F8F7F4;
@@ -477,7 +491,7 @@
       flex-direction: column;
     }
 
-    /* ── Screen visibility — JS controls these ───────────────────────────── */
+    /* Both screens hidden until JS decides */
     #login-screen { display: none; }
     #app-screen   { display: none; }
 
@@ -494,22 +508,17 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 2.5rem 2rem;
-      max-width: 360px;
+      max-width: 380px;
       width: 100%;
       text-align: center;
       box-shadow: var(--shadow);
     }
-
     .login-card .home-icon { font-size: 2.5rem; margin-bottom: 0.75rem; display: block; }
     .login-card h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.25rem; }
     .login-card p  { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
 
     /* ── App shell ───────────────────────────────────────────────────────── */
-    #app-screen {
-      flex: 1;
-      flex-direction: column;
-      min-height: 0;
-    }
+    #app-screen { flex: 1; flex-direction: column; min-height: 0; }
 
     /* ── Header ──────────────────────────────────────────────────────────── */
     header {
@@ -521,83 +530,75 @@
       gap: 0.75rem;
       flex-wrap: wrap;
     }
-
     header h1 { font-size: 1.05rem; font-weight: 700; flex: 1; white-space: nowrap; }
-
     #legend { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
-
-    .legend-chip {
-      display: flex; align-items: center; gap: 0.3rem;
-      font-size: 0.78rem; color: var(--muted);
-    }
-
-    .legend-dot {
-      width: 10px; height: 10px; border-radius: 50%;
-      display: inline-block; flex-shrink: 0;
-    }
-
+    .legend-chip { display: flex; align-items: center; gap: 0.3rem; font-size: 0.78rem; color: var(--muted); }
+    .legend-dot  { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
     .header-right { display: flex; align-items: center; gap: 0.5rem; }
 
     #user-badge {
       width: 32px; height: 32px; border-radius: 50%;
       color: #fff; font-size: 0.7rem; font-weight: 700;
       display: flex; align-items: center; justify-content: center;
-      flex-shrink: 0; cursor: pointer;
-      border: 2px solid transparent;
-      transition: border-color 0.15s;
+      cursor: pointer; border: 2px solid transparent; transition: border-color 0.15s;
+      flex-shrink: 0;
     }
     #user-badge:hover { border-color: var(--text); }
 
-    /* ── Calendar wrapper ────────────────────────────────────────────────── */
+    /* ── Calendar ────────────────────────────────────────────────────────── */
     #calendar-wrap { flex: 1; padding: 1rem; min-height: 0; overflow: auto; }
     #calendar { height: calc(100dvh - 120px); }
 
     /* ── FullCalendar overrides ──────────────────────────────────────────── */
-    .fc .fc-toolbar-title    { font-size: 1rem !important; font-weight: 700; }
-    .fc .fc-button            { font-size: 0.8rem !important; padding: 0.3em 0.7em !important; border-radius: 6px !important; text-transform: capitalize; }
+    .fc .fc-toolbar-title     { font-size: 1rem !important; font-weight: 700; }
+    .fc .fc-button            { font-size: 0.8rem !important; padding: 0.3em 0.7em !important; border-radius: 6px !important; }
     .fc .fc-button-primary    { background: var(--accent) !important; border-color: var(--accent) !important; }
     .fc .fc-button-primary:not(.fc-button-active):hover { filter: brightness(1.1); }
     .fc .fc-button-active     { background: #1e3a8a !important; border-color: #1e3a8a !important; }
     .fc-event                 { border-radius: 5px !important; border: none !important; font-size: 0.78rem !important; cursor: pointer; }
-    .fc-initials              { font-size: 0.65rem; background: rgba(0,0,0,0.18); border-radius: 3px; padding: 0 3px; margin-right: 3px; vertical-align: middle; color: #fff; }
-    .fc-daygrid-day:hover .fc-daygrid-day-frame { background: rgba(37,99,235,0.04); }
-    /* Show day numbers clearly in month view */
+    .fc-initials              { font-size: 0.65rem; background: rgba(0,0,0,0.18); border-radius: 3px; padding: 0 3px; margin-right: 3px; color: #fff; }
     .fc .fc-daygrid-day-number { font-size: 0.85rem; font-weight: 500; padding: 4px 6px; }
     .fc .fc-col-header-cell-cushion { font-weight: 600; font-size: 0.82rem; }
+    /* Show timed events in month grid */
+    .fc .fc-timegrid-event    { border-radius: 5px !important; }
 
     /* ── Buttons ─────────────────────────────────────────────────────────── */
     .btn {
       display: inline-flex; align-items: center; gap: 0.3rem;
       padding: 0.45rem 0.9rem; border-radius: var(--radius);
       font-size: 0.85rem; font-weight: 600; cursor: pointer;
-      border: none; transition: filter 0.15s; text-decoration: none; white-space: nowrap;
+      border: none; transition: filter 0.15s; white-space: nowrap;
     }
-    .btn:hover       { filter: brightness(1.08); }
-    .btn-primary     { background: var(--accent); color: #fff; }
-    .btn-ghost       { background: transparent; color: var(--muted); border: 1px solid var(--border); }
-    .btn-danger      { background: var(--danger); color: #fff; }
-    .btn-google {
+    .btn:hover   { filter: brightness(1.08); }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-ghost   { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    .btn-danger  { background: var(--danger); color: #fff; }
+    .btn-google  {
       background: #fff; color: #3c4043; border: 1px solid var(--border);
       font-size: 0.95rem; padding: 0.65rem 1.2rem;
       border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
     .btn-google svg { width: 18px; height: 18px; }
 
-    /* ── Event modal ─────────────────────────────────────────────────────── */
-    #event-modal {
+    /* ── Modals (shared backdrop) ────────────────────────────────────────── */
+    .modal-backdrop {
       position: fixed; inset: 0; background: rgba(0,0,0,0.45);
       align-items: center; justify-content: center;
       padding: 1rem; z-index: 1000; display: none;
+      overflow-y: auto;
     }
 
     .modal-card {
       background: var(--surface); border-radius: var(--radius);
-      width: 100%; max-width: 440px; padding: 1.5rem; box-shadow: var(--shadow);
+      width: 100%; max-width: 440px; padding: 1.5rem;
+      box-shadow: var(--shadow);
+      /* Prevent card from being taller than viewport */
+      max-height: 90vh; overflow-y: auto;
+      margin: auto;
     }
-
     .modal-card h2 { font-size: 1.05rem; font-weight: 700; margin-bottom: 1.25rem; }
 
-    /* ── Form ────────────────────────────────────────────────────────────── */
+    /* ── Form fields ─────────────────────────────────────────────────────── */
     .field { margin-bottom: 1rem; }
 
     label {
@@ -606,15 +607,20 @@
       text-transform: uppercase; letter-spacing: 0.04em;
     }
 
+    /* All inputs same width, never overflow card */
     input[type="text"],
     input[type="date"],
     input[type="datetime-local"],
     textarea {
-      width: 100%; padding: 0.55rem 0.75rem;
+      width: 100%;
+      min-width: 0;          /* critical — prevents flex children from overflowing */
+      padding: 0.55rem 0.75rem;
       border: 1px solid var(--border); border-radius: 7px;
-      font-size: 0.9rem; font-family: var(--font);
+      font-size: 0.85rem; font-family: var(--font);
       background: var(--bg); color: var(--text); transition: border-color 0.15s;
     }
+    /* datetime-local is wide — shrink font on small screens */
+    input[type="datetime-local"] { font-size: 0.8rem; }
 
     input:focus, textarea:focus {
       outline: none; border-color: var(--accent);
@@ -623,8 +629,12 @@
 
     textarea { resize: vertical; min-height: 70px; }
 
-    .field-row { display: flex; gap: 0.75rem; }
-    .field-row .field { flex: 1; }
+    /* Stack date fields vertically so they never overflow */
+    .field-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
 
     .allday-row {
       display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;
@@ -632,36 +642,44 @@
     .allday-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
     .allday-row label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 0.88rem; font-weight: 500; color: var(--text); cursor: pointer; }
 
-    .modal-actions { display: flex; gap: 0.5rem; margin-top: 1.25rem; flex-wrap: wrap; }
+    .modal-actions { display: flex; gap: 0.5rem; margin-top: 1.25rem; flex-wrap: wrap; align-items: center; }
     .modal-actions .btn-danger { margin-left: auto; }
 
-    /* ── Color picker modal ──────────────────────────────────────────────── */
-    #color-modal {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.45);
-      align-items: center; justify-content: center;
-      padding: 1rem; z-index: 1100; display: none;
-    }
+    /* ── Color picker ────────────────────────────────────────────────────── */
+    #color-modal { z-index: 1100; }
 
     .color-card {
       background: var(--surface); border-radius: var(--radius);
-      padding: 1.5rem; box-shadow: var(--shadow); max-width: 320px; width: 100%;
+      padding: 1.5rem; box-shadow: var(--shadow);
+      max-width: 300px; width: 100%; margin: auto;
     }
-
-    .color-card h2 { font-size: 1rem; font-weight: 700; margin-bottom: 1rem; }
+    .color-card h2 { font-size: 1rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .color-card p  { font-size: 0.82rem; color: var(--muted); margin-bottom: 1rem; }
 
     #color-grid {
-      display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.6rem;
-      margin-bottom: 1.25rem;
+      display: grid; grid-template-columns: repeat(5, 1fr);
+      gap: 0.6rem; margin-bottom: 1.25rem;
     }
 
     .color-swatch {
-      width: 40px; height: 40px; border-radius: 50%; border: 3px solid transparent;
-      cursor: pointer; transition: transform 0.15s, border-color 0.15s;
+      width: 40px; height: 40px; border-radius: 50%;
+      border: 3px solid transparent; cursor: pointer;
+      transition: transform 0.15s, border-color 0.15s;
+      position: relative;
     }
     .color-swatch:hover   { transform: scale(1.15); }
+    .color-swatch.selected::after {
+      content: "✓"; position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 1rem; font-weight: 700;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    }
     .color-swatch.selected { border-color: var(--text); }
 
-    /* ── Hover tooltip ───────────────────────────────────────────────────── */
+    .color-actions { display: flex; gap: 0.5rem; }
+    .color-actions .btn { flex: 1; justify-content: center; }
+
+    /* ── Tooltip ─────────────────────────────────────────────────────────── */
     #event-tooltip {
       position: fixed; display: none; z-index: 900;
       background: #1A1814; color: #fff;
@@ -678,24 +696,23 @@
       background: #1A1814; color: #fff;
       padding: 0.65rem 1.2rem; border-radius: 8px;
       font-size: 0.88rem; font-weight: 500;
-      opacity: 0; transition: all 0.25s ease;
-      z-index: 2000; white-space: nowrap;
+      opacity: 0; transition: all 0.25s ease; z-index: 2000; white-space: nowrap;
     }
     .toast.show  { opacity: 1; transform: translateX(-50%) translateY(0); }
     .toast.error { background: var(--danger); }
 
     /* ── Mobile ──────────────────────────────────────────────────────────── */
     @media (max-width: 640px) {
-      header h1  { font-size: 0.9rem; }
+      header h1  { font-size: 0.88rem; }
       #legend    { display: none; }
-      .field-row { flex-direction: column; gap: 0; }
       #calendar  { height: calc(100dvh - 100px); }
+      .modal-card { padding: 1.25rem; }
     }
   </style>
 </head>
 <body>
 
-  <!-- ── Login ──────────────────────────────────────────────────────────────── -->
+  <!-- Login -->
   <div id="login-screen">
     <div class="login-card">
       <span class="home-icon">🏠</span>
@@ -713,7 +730,7 @@
     </div>
   </div>
 
-  <!-- ── App ────────────────────────────────────────────────────────────────── -->
+  <!-- App -->
   <div id="app-screen">
     <header>
       <h1>🏠 Ramchandran Family Calendar</h1>
@@ -729,8 +746,8 @@
     </div>
   </div>
 
-  <!-- ── Event modal ────────────────────────────────────────────────────────── -->
-  <div id="event-modal" role="dialog" aria-modal="true">
+  <!-- Event modal -->
+  <div id="event-modal" class="modal-backdrop" role="dialog" aria-modal="true">
     <div class="modal-card">
       <h2 id="modal-title">New entry</h2>
       <form id="event-form" novalidate>
@@ -766,19 +783,23 @@
     </div>
   </div>
 
-  <!-- ── Color picker modal ─────────────────────────────────────────────────── -->
-  <div id="color-modal" role="dialog" aria-modal="true">
+  <!-- Color picker modal -->
+  <div id="color-modal" class="modal-backdrop" role="dialog" aria-modal="true">
     <div class="color-card">
-      <h2>Choose your color</h2>
+      <h2>Your color</h2>
+      <p>Choose how your entries appear to everyone.</p>
       <div id="color-grid"></div>
-      <button id="btn-color-cancel" class="btn btn-ghost" style="width:100%">Cancel</button>
+      <div class="color-actions">
+        <button id="btn-color-save" class="btn btn-primary">Save color</button>
+        <button id="btn-color-cancel" class="btn btn-ghost">Cancel</button>
+      </div>
     </div>
   </div>
 
-  <!-- ── Hover tooltip ──────────────────────────────────────────────────────── -->
+  <!-- Tooltip -->
   <div id="event-tooltip"></div>
 
-  <!-- ── Toast ──────────────────────────────────────────────────────────────── -->
+  <!-- Toast -->
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 </body>
